@@ -2,6 +2,7 @@
 
 /*
  * Copyright (c) 2015-2016 Intel Corporation
+ * Copyright (c) 2021 Nordic Semiconductor
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -15,7 +16,9 @@
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
-#include <bluetooth/l2cap.h>
+#include <bluetooth/gatt.h>
+#include <bluetooth/uuid.h>
+#include <bluetooth/conn.h>
 
 #include "bs_types.h"
 #include "bs_tracing.h"
@@ -41,213 +44,106 @@ static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
 };
 
-#define DATA_MTU 128
-#define DATA_BUF_SIZE BT_L2CAP_SDU_BUF_SIZE(DATA_MTU)
-#define L2CAP_CHANNELS 5
-#define SERVERS 1
-
-NET_BUF_POOL_FIXED_DEFINE(data_pool, L2CAP_CHANNELS, DATA_BUF_SIZE, 8, NULL);
-
-static struct channel {
-	uint8_t chan_id; /* Internal number that identifies L2CAP channel. */
-	struct bt_l2cap_le_chan le;
-	bool in_use;
-} channels[L2CAP_CHANNELS];
-
-static struct channel *get_free_channel()
-{
-	uint8_t i;
-	struct channel *chan;
-
-	for (i = 0U; i < L2CAP_CHANNELS; i++) {
-		if (channels[i].in_use) {
-			continue;
-		}
-
-		chan = &channels[i];
-
-		(void)memset(chan, 0, sizeof(*chan));
-		chan->chan_id = i;
-
-		channels[i].in_use = true;
-
-		return chan;
-	}
-
-	return NULL;
-}
-
-static struct bt_l2cap_server servers[SERVERS];
-
-static struct net_buf *chan_alloc_buf_cb(struct bt_l2cap_chan *chan)
-{
-	return net_buf_alloc(&data_pool, K_FOREVER);
-}
-
-static int chan_recv_cb(struct bt_l2cap_chan *l2cap_chan, struct net_buf *buf)
-{
-	struct channel *chan = CONTAINER_OF(l2cap_chan, struct channel, le);
-
-	printk("chan_recv_cb: chan_id: %d, data_length: %d\n\n", chan->chan_id, buf->len);
-
-	/* TODO something with the received data. */
-
-	return 0;
-}
-
-static void chan_sent_cb(struct bt_l2cap_chan *l2cap_chan)
-{
-	struct channel *chan = CONTAINER_OF(l2cap_chan, struct channel, le);
-
-	printk("chan_sent_cb: chan_id: %d\n", chan->chan_id);
-}
-
-static void chan_connected_cb(struct bt_l2cap_chan *l2cap_chan)
-{
-	struct channel *chan = CONTAINER_OF(l2cap_chan, struct channel, le);
-
-	printk("chan_connected_cb: chan_id: %d\n", chan->chan_id);
-
-	printk("chan_connected_cb: tx.mtu %d, tx.mps: %d, rx.mtu: %d, rx.mps %d\n",
-			sys_cpu_to_le16(chan->le.tx.mtu),
-			sys_cpu_to_le16(chan->le.tx.mps),
-			sys_cpu_to_le16(chan->le.rx.mtu),
-			sys_cpu_to_le16(chan->le.rx.mps));
-
-	/* TODO something when channel is connected */
-}
-
-static void chan_disconnected_cb(struct bt_l2cap_chan *l2cap_chan)
-{
-	struct channel *chan = CONTAINER_OF(l2cap_chan, struct channel, le);
-
-	printk("chan_disconnected_cb: chan_id: %d\n", chan->chan_id);
-
-	chan->in_use = false;
-
-	/* TODO something when channel is disconnected */
-}
-
-static void chan_status_cb(struct bt_l2cap_chan *l2cap_chan, atomic_t *status)
-{
-	struct channel *chan = CONTAINER_OF(l2cap_chan, struct channel, le);
-
-	printk("chan_status_cb: chan_id: %d, status: %ld\n", chan->chan_id, *status);
-}
-
-static void chan_released_cb(struct bt_l2cap_chan *l2cap_chan)
-{
-	struct channel *chan = CONTAINER_OF(l2cap_chan, struct channel, le);
-
-	printk("chan_released_cb: chan_id: %d\n", chan->chan_id);
-
-}
-
-static void chan_reconfigured_cb(struct bt_l2cap_chan *l2cap_chan)
-{
-	struct channel *chan = CONTAINER_OF(l2cap_chan, struct channel, le);
-
-	printk("chan_reconfigured_cb: chan_id: %d\n", chan->chan_id);
-
-	/* TODO something when channel is reconfigured */
-}
-
-static const struct bt_l2cap_chan_ops l2cap_ops = {
-	.alloc_buf	= chan_alloc_buf_cb,
-	.recv		= chan_recv_cb,
-	.sent		= chan_sent_cb,
-	.connected	= chan_connected_cb,
-	.disconnected	= chan_disconnected_cb,
-	.status 	= chan_status_cb,
-	.released 	= chan_released_cb,
-	.reconfigured	= chan_reconfigured_cb,
-};
-
-
-static void connect_num_channels(uint8_t num_l2cap_channels)
-{
-	struct channel *chan = NULL;
-	struct bt_l2cap_chan *allocated_channels[L2CAP_CHANNELS] = {NULL};
-	uint8_t i = 0;
-	int err = 0;
-
-	for (i = 0U; i < num_l2cap_channels; i++) {
-		chan = get_free_channel();
-		if (!chan) {
-			printk("connect_num_channels: failed, chan not free \n");
-			/* TODO should fail */
-			return;
-		}
-		chan->le.chan.ops = &l2cap_ops;
-		chan->le.tx.mtu = DATA_MTU;
-		allocated_channels[i] = &chan->le.chan;
-	}
-
-	err = bt_l2cap_ecred_chan_connect(default_conn, allocated_channels,
-						servers[0].psm);
-	if (err) {
-		printk("connect_num_channels: can't connect ecred %d \n", err);
-	}
-}
-
-static int accept(struct bt_conn *conn, struct bt_l2cap_chan **l2cap_chan)
-{
-	struct channel *chan;
-
-	chan = get_free_channel();
-	if (!chan) {
-		return -ENOMEM;
-	}
-
-	chan->le.chan.ops = &l2cap_ops;
-	chan->le.rx.mtu = DATA_MTU;
-
-	*l2cap_chan = &chan->le.chan;
-
-	return 0;
-}
-
-static struct bt_l2cap_server *get_free_server(void)
-{
-	uint8_t i;
-
-	for (i = 0U; i < SERVERS ; i++) {
-		if (servers[i].psm) {
-			continue;
-		}
-
-		return &servers[i];
-	}
-
-	return NULL;
-}
-
-static void register_l2cap_server(void)
-{
-	struct bt_l2cap_server *server;
-
-	server = get_free_server();
-	if (!server) {
-		FAIL("Failed to get free server\n");
-		return;
-	}
-
-	server->accept = accept;
-	/* This should be 0 for dynamically allocated channels. 0x27 for EATT.
-	   If 0 is used, then a newly allocated value will have been assigned to it (0x80 is the first)
-	   The value is expected to be exposed by a GATT service.
-	   But it writes it directly to the server as well, so we can use it without GATT */
-	server->psm = 0;
-
-	if (bt_l2cap_server_register(server) < 0) {
-		FAIL("Failed to get free server\n");
-		return;
-	}
-
-	printk("L2CAP server registered, PSM:0x%X\n", server->psm);
-}
+static struct bt_gatt_discover_params discover_params, discover_params_2;
 
 static bool volatile  is_connected;
+static bool volatile  all_attributes_found = false;
+static bool volatile  read_char_in_progress = false;
+
+static uint16_t service_handle = 0;
+
+static struct bt_uuid_128 uuid_primary = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0xf5173300, 0x32a3, 0x4b22, 0xa47b, 0x7644d578b069));
+
+static struct bt_uuid_128 uuid_char_1 = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0xf5173301, 0x32a3, 0x4b22, 0xa47b, 0x7644d578b069));
+
+static struct bt_uuid_128 uuid_char_2 = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0xf5173302, 0x32a3, 0x4b22, 0xa47b, 0x7644d578b069));
+
+
+#define LENGTH_CHAR_1	1500
+#define LENGTH_CHAR_2	50
+
+static uint8_t char_1_data[LENGTH_CHAR_1];
+static uint8_t char_2_data[LENGTH_CHAR_2];
+
+static uint16_t char_1_attr_handle = 0;
+static uint16_t char_2_attr_handle = 0;
+
+
+static ssize_t read_char_1(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			 void *buf, uint16_t len, uint16_t offset)
+{
+	const uint8_t *value = char_1_data;
+	printk("read_char_1. Len %d, offset %d\n", len, offset);
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, value,
+				 LENGTH_CHAR_1);
+}
+
+static ssize_t write_char_1(struct bt_conn *conn,
+			  const struct bt_gatt_attr *attr, const void *buf,
+			  uint16_t len, uint16_t offset, uint8_t flags)
+{
+	uint8_t *value = char_1_data;
+
+	printk("write_char_2. Len %d, offset %d\n", len, offset);
+
+	if (offset > LENGTH_CHAR_1) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (offset + len > LENGTH_CHAR_1)
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+
+
+	memcpy(value + offset, buf, len);
+
+	return len;
+}
+
+static ssize_t read_char_2(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			 void *buf, uint16_t len, uint16_t offset)
+{
+	printk("read_char_2. Len %d, offset %d\n", len, offset);
+	const uint8_t *value = char_2_data;
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, value,
+				 LENGTH_CHAR_2);
+}
+
+static ssize_t write_char_2(struct bt_conn *conn,
+			  const struct bt_gatt_attr *attr, const void *buf,
+			  uint16_t len, uint16_t offset, uint8_t flags)
+{
+	uint8_t *value = char_2_data;
+
+	printk("write_char_2. Len %d, offset %d\n", len, offset);
+
+	if (offset > LENGTH_CHAR_2) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (offset + len > LENGTH_CHAR_2)
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+
+
+	memcpy(value + offset, buf, len);
+
+	return len;
+}
+
+struct bt_gatt_attr gatt_attributes[] = {
+	BT_GATT_PRIMARY_SERVICE(&uuid_primary),
+	BT_GATT_CHARACTERISTIC(&uuid_char_1.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE, 0,
+			       read_char_1, write_char_1, char_1_data),
+	BT_GATT_CHARACTERISTIC(&uuid_char_2.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE, 0,
+			       read_char_2, write_char_2, char_2_data)
+};
+
+static struct bt_gatt_service gatt_service = BT_GATT_SERVICE(gatt_attributes);
+
 
 static void connected(struct bt_conn *conn, uint8_t conn_err)
 {
@@ -306,6 +202,16 @@ static void test_peripheral_main(void)
 	}
 	printk("Peripheral Bluetooth initialized.\n");
 
+	for (uint16_t i = 0; i < LENGTH_CHAR_1; i++) {
+		char_1_data[i] = (uint8_t) i;
+	}
+
+	for (uint16_t i = 0; i < LENGTH_CHAR_2; i++) {
+		char_2_data[i] = (uint8_t) i + 50;
+	}
+
+	bt_gatt_service_register(&gatt_service);
+
 	printk("Connectable advertising...\n");
 	err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
 	if (err) {
@@ -323,11 +229,8 @@ static void test_peripheral_main(void)
 	/* Wait a bit to ensure that all LLCP have time to finish */
 	k_sleep(K_MSEC(1000));
 
-	register_l2cap_server();
-	connect_num_channels(5);
-
-	/* Wait a bit, to let the connection be done. */
-	k_sleep(K_MSEC(1000));
+	/* Wait for a while to disconnect */
+	k_sleep(K_MSEC(5000));
 
 	/* Disconnect */
 	printk("Peripheral Disconnecting....\n");
@@ -351,7 +254,85 @@ static void test_peripheral_main(void)
 	return;
 }
 
+static uint8_t discover_char_2_func(struct bt_conn *conn,
+		const struct bt_gatt_attr *attr,
+		struct bt_gatt_discover_params *params)
+{
+	int err;
 
+	if (!attr) {
+		printk("Discover complete\n");
+		memset(params, 0, sizeof(*params));
+		return BT_GATT_ITER_STOP;
+	}
+
+	printk("[ATTRIBUTE] handle %u\n", attr->handle);
+
+	printk("Discover Char 2 found\n");
+	char_2_attr_handle = attr->handle;
+
+	all_attributes_found = true;
+	return BT_GATT_ITER_STOP;
+}
+
+static uint8_t discover_char_1_func(struct bt_conn *conn,
+		const struct bt_gatt_attr *attr,
+		struct bt_gatt_discover_params *params)
+{
+	int err;
+
+	if (!attr) {
+		printk("Discover complete\n");
+		memset(params, 0, sizeof(*params));
+		return BT_GATT_ITER_STOP;
+	}
+
+	printk("[ATTRIBUTE] handle %u\n", attr->handle);
+
+	printk("Discover Char 1 found\n");
+	char_1_attr_handle = attr->handle;
+
+	discover_params_2.uuid = &uuid_char_2.uuid;
+	discover_params_2.start_handle = service_handle + 1;
+	discover_params_2.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+	discover_params_2.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+	discover_params_2.func = discover_char_2_func;
+
+	err = bt_gatt_discover(conn, &discover_params_2);
+	return BT_GATT_ITER_STOP;
+}
+
+static uint8_t discover_primary_handler_func(struct bt_conn *conn,
+		const struct bt_gatt_attr *attr,
+		struct bt_gatt_discover_params *params)
+{
+	int err;
+
+	if (!attr) {
+		printk("Discover complete\n");
+		memset(params, 0, sizeof(*params));
+		return BT_GATT_ITER_STOP;
+	}
+
+	service_handle = attr->handle;
+
+	printk("[ATTRIBUTE] handle %u\n", attr->handle);
+
+	printk("Discover Primary found\n");
+	discover_params_2.uuid = &uuid_char_1.uuid;
+	discover_params_2.start_handle = attr->handle + 1;
+	discover_params_2.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+	discover_params_2.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+	discover_params_2.func = discover_char_1_func;
+
+	err = bt_gatt_discover(conn, &discover_params_2);
+	if (err) {
+		FAIL("Discover failed (err %d)\n", err);
+	}
+
+	return BT_GATT_ITER_STOP;
+
+}
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 		struct net_buf_simple *ad)
 {
@@ -367,11 +348,38 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	param = BT_LE_CONN_PARAM_DEFAULT;
 	err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN,
 				param, &default_conn);
+
 	if (err) {
 		FAIL("Create conn failed (err %d)\n", err);
 		return;
 	}
+	printk("Device connected\n");
+}
 
+uint8_t gatt_read_cb(struct bt_conn *conn, uint8_t err,
+		     struct bt_gatt_read_params *params,
+		     const void *data, uint16_t length)
+{
+	static uint16_t gatt_read_cb_counter = 0;
+	printk("gatt_read_cb: read data: %d, length: %d, err: %d\n", gatt_read_cb_counter++, length, err);
+	const uint8_t *formatted_data = data;
+
+	/* read complete */
+	if (!data) {
+		printk("gatt_read_cb: no data received\n");
+		read_char_in_progress = false;
+		return BT_GATT_ITER_STOP;
+	} else {
+		printk("Data: ");
+		for (uint16_t i = 0; i < length; i++) {
+			printk("%d, ", *formatted_data);
+			formatted_data++;
+		}
+		printk("\n");
+	}
+
+
+	return BT_GATT_ITER_CONTINUE;
 }
 
 static void test_central_main(void)
@@ -394,6 +402,7 @@ static void test_central_main(void)
 	}
 	printk("Central Bluetooth initialized.\n");
 
+
 	err = bt_le_scan_start(&scan_param, device_found);
 	if (err) {
 		FAIL("Scanning failed to start (err %d)\n", err);
@@ -408,9 +417,73 @@ static void test_central_main(void)
 	}
 	printk("Central Connected.\n");
 
-	/* Create the server, as it is needed to connect L2CAP channels */
-	register_l2cap_server();
+	/* Wait a bit to ensure that all LLCP have time to finish */
+	k_sleep(K_MSEC(1000));
 
+	discover_params.uuid = &uuid_primary.uuid;
+	discover_params.func = discover_primary_handler_func;
+	discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
+	discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+	discover_params.type = BT_GATT_DISCOVER_PRIMARY;
+
+	printk("Discover attributes\n");
+	err = bt_gatt_discover(default_conn, &discover_params);
+	if (err) {
+		FAIL("Discover failed(err %d)\n", err);
+		return;
+	}
+
+	while (!all_attributes_found) {
+		k_sleep(K_MSEC(100));
+	}
+
+	printk("Attr handle char_1_attr_handle: %d\n", char_1_attr_handle);
+	printk("Attr handle char_2_attr_handle: %d\n", char_2_attr_handle);
+
+	//uint16_t mult_handles[3] = {char_1_attr_handle, char_2_attr_handle, 0};
+
+	/* Read them */
+	struct bt_gatt_read_params read_params;
+
+	read_params.handle_count = 1;
+	read_params.single.handle = char_2_attr_handle;
+	read_params.single.offset = 0x0000;
+	read_params.func = gatt_read_cb;
+
+	read_char_in_progress = true;
+	err = bt_gatt_read(default_conn, &read_params);
+	if (err) {
+		FAIL("Gatt Read failed (err %d)\n", err);
+		return;
+	}
+
+#if 0
+	for (uint16_t i = 0; i < 20; i++) {
+
+		while (read_char_in_progress) {
+			k_sleep(K_MSEC(100));
+		}
+
+		read_char_in_progress = true;
+		read_params.single.offset++;
+		err = bt_gatt_read(default_conn, &read_params);
+		if (err) {
+			FAIL("Gatt Read failed (err %d)\n", err);
+			return;
+		}
+	}
+	while (read_char_in_progress) {
+		k_sleep(K_MSEC(100));
+	}
+	read_params.single.handle = char_2_attr_handle;
+	read_char_in_progress = true;
+	err = bt_gatt_read(default_conn, &read_params);
+	if (err) {
+		FAIL("Gatt Read failed (err %d)\n", err);
+		return;
+	}
+#endif
+	/* Wait for disconnect */
 	while (is_connected) {
 		k_sleep(K_MSEC(100));
 	}

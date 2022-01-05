@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2018 Oticon A/S
+# Copyright (c) 2021 Nordic Semiconductor
 # SPDX-License-Identifier: Apache-2.0
 
 # EATT test
