@@ -63,7 +63,7 @@ static struct bt_uuid_128 uuid_char_2 = BT_UUID_INIT_128(
 
 
 #define LENGTH_CHAR_1	1500
-#define LENGTH_CHAR_2	50
+#define LENGTH_CHAR_2	10
 
 static uint8_t char_1_data[LENGTH_CHAR_1];
 static uint8_t char_2_data[LENGTH_CHAR_2];
@@ -135,10 +135,12 @@ static ssize_t write_char_2(struct bt_conn *conn,
 struct bt_gatt_attr gatt_attributes[] = {
 	BT_GATT_PRIMARY_SERVICE(&uuid_primary),
 	BT_GATT_CHARACTERISTIC(&uuid_char_1.uuid,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE, 0,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
 			       read_char_1, write_char_1, char_1_data),
 	BT_GATT_CHARACTERISTIC(&uuid_char_2.uuid,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE, 0,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
 			       read_char_2, write_char_2, char_2_data)
 };
 
@@ -212,6 +214,12 @@ static void test_peripheral_main(void)
 
 	bt_gatt_service_register(&gatt_service);
 
+
+	uint16_t handle_char_1 = bt_gatt_attr_get_handle(bt_gatt_find_by_uuid(NULL, 0, &uuid_char_1.uuid));
+	uint16_t handle_char_2 = bt_gatt_attr_get_handle(bt_gatt_find_by_uuid(NULL, 0, &uuid_char_2.uuid));
+
+	printk("Handle char 1: %d, Handle char 2: %d\n", handle_char_1, handle_char_2);
+
 	printk("Connectable advertising...\n");
 	err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
 	if (err) {
@@ -230,7 +238,7 @@ static void test_peripheral_main(void)
 	k_sleep(K_MSEC(1000));
 
 	/* Wait for a while to disconnect */
-	k_sleep(K_MSEC(5000));
+	k_sleep(K_MSEC(10000));
 
 	/* Disconnect */
 	printk("Peripheral Disconnecting....\n");
@@ -269,7 +277,8 @@ static uint8_t discover_char_2_func(struct bt_conn *conn,
 	printk("[ATTRIBUTE] handle %u\n", attr->handle);
 
 	printk("Discover Char 2 found\n");
-	char_2_attr_handle = attr->handle;
+	// TODO Figure out why + 1 is needed to the handle
+	char_2_attr_handle = attr->handle + 1;
 
 	all_attributes_found = true;
 	return BT_GATT_ITER_STOP;
@@ -290,7 +299,8 @@ static uint8_t discover_char_1_func(struct bt_conn *conn,
 	printk("[ATTRIBUTE] handle %u\n", attr->handle);
 
 	printk("Discover Char 1 found\n");
-	char_1_attr_handle = attr->handle;
+	// TODO Figure out why + 1 is needed to the handle
+	char_1_attr_handle = attr->handle + 1;
 
 	discover_params_2.uuid = &uuid_char_2.uuid;
 	discover_params_2.start_handle = service_handle + 1;
@@ -356,12 +366,12 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	printk("Device connected\n");
 }
 
-uint8_t gatt_read_cb(struct bt_conn *conn, uint8_t err,
+uint8_t gatt_read_1_cb(struct bt_conn *conn, uint8_t err,
 		     struct bt_gatt_read_params *params,
 		     const void *data, uint16_t length)
 {
 	static uint16_t gatt_read_cb_counter = 0;
-	printk("gatt_read_cb: read data: %d, length: %d, err: %d\n", gatt_read_cb_counter++, length, err);
+	printk("gatt_read_1_cb: read data: %d, length: %d, err: %d\n", gatt_read_cb_counter++, length, err);
 	const uint8_t *formatted_data = data;
 
 	/* read complete */
@@ -382,6 +392,31 @@ uint8_t gatt_read_cb(struct bt_conn *conn, uint8_t err,
 	return BT_GATT_ITER_CONTINUE;
 }
 
+uint8_t gatt_read_2_cb(struct bt_conn *conn, uint8_t err,
+		     struct bt_gatt_read_params *params,
+		     const void *data, uint16_t length)
+{
+	static uint16_t gatt_read_cb_counter = 0;
+	printk("gatt_read_2_cb: read data: %d, length: %d, err: %d\n", gatt_read_cb_counter++, length, err);
+	const uint8_t *formatted_data = data;
+
+	/* read complete */
+	if (!data) {
+		printk("gatt_read_cb: no data received\n");
+		read_char_in_progress = false;
+		return BT_GATT_ITER_STOP;
+	} else {
+		printk("Data: ");
+		for (uint16_t i = 0; i < length; i++) {
+			printk("%d, ", *formatted_data);
+			formatted_data++;
+		}
+		printk("\n");
+	}
+
+
+	return BT_GATT_ITER_CONTINUE;
+}
 static void test_central_main(void)
 {
 	struct bt_le_scan_param scan_param = {
@@ -440,15 +475,13 @@ static void test_central_main(void)
 	printk("Attr handle char_1_attr_handle: %d\n", char_1_attr_handle);
 	printk("Attr handle char_2_attr_handle: %d\n", char_2_attr_handle);
 
-	//uint16_t mult_handles[3] = {char_1_attr_handle, char_2_attr_handle, 0};
-
-	/* Read them */
+	/* Read characterstic 1 */
 	struct bt_gatt_read_params read_params;
 
 	read_params.handle_count = 1;
-	read_params.single.handle = char_2_attr_handle;
+	read_params.single.handle = char_1_attr_handle;
 	read_params.single.offset = 0x0000;
-	read_params.func = gatt_read_cb;
+	read_params.func = gatt_read_1_cb;
 
 	read_char_in_progress = true;
 	err = bt_gatt_read(default_conn, &read_params);
@@ -457,32 +490,21 @@ static void test_central_main(void)
 		return;
 	}
 
-#if 0
-	for (uint16_t i = 0; i < 20; i++) {
+	// Wait a bit, then read the  characteristic 2
+	k_sleep(K_MSEC(500));
+	struct bt_gatt_read_params read_params_2;
+	read_params_2.handle_count = 1;
+	read_params_2.single.handle = char_2_attr_handle;
+	read_params_2.single.offset = 0x0000;
+	read_params_2.func = gatt_read_2_cb;
 
-		while (read_char_in_progress) {
-			k_sleep(K_MSEC(100));
-		}
-
-		read_char_in_progress = true;
-		read_params.single.offset++;
-		err = bt_gatt_read(default_conn, &read_params);
-		if (err) {
-			FAIL("Gatt Read failed (err %d)\n", err);
-			return;
-		}
-	}
-	while (read_char_in_progress) {
-		k_sleep(K_MSEC(100));
-	}
-	read_params.single.handle = char_2_attr_handle;
 	read_char_in_progress = true;
-	err = bt_gatt_read(default_conn, &read_params);
+	err = bt_gatt_read(default_conn, &read_params_2);
 	if (err) {
 		FAIL("Gatt Read failed (err %d)\n", err);
 		return;
 	}
-#endif
+
 	/* Wait for disconnect */
 	while (is_connected) {
 		k_sleep(K_MSEC(100));
