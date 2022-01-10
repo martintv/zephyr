@@ -1355,8 +1355,8 @@ ssize_t bt_gatt_attr_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 
 	len = MIN(buf_len, value_len - offset);
 
-	BT_DBG("handle 0x%04x offset %u length %u", attr->handle, offset,
-	       len);
+	BT_DBG("handle 0x%04x offset %u length %u buf_len %u value_len %u", attr->handle, offset,
+	       len, buf_len, value_len);
 
 	memcpy(buf, (uint8_t *)value + offset, len);
 

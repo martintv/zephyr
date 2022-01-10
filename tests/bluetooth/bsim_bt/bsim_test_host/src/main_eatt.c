@@ -70,6 +70,7 @@ static uint8_t char_2_data[LENGTH_CHAR_2];
 
 static uint16_t char_1_attr_handle = 0;
 static uint16_t char_2_attr_handle = 0;
+static struct bt_gatt_exchange_params exchange_params;
 
 
 static ssize_t read_char_1(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -146,6 +147,15 @@ struct bt_gatt_attr gatt_attributes[] = {
 
 static struct bt_gatt_service gatt_service = BT_GATT_SERVICE(gatt_attributes);
 
+static void exchange_func(struct bt_conn *conn, uint8_t att_err,
+			  struct bt_gatt_exchange_params *params)
+{
+	struct bt_conn_info info = {0};
+	int err;
+
+	printk("MTU exchange %s\n", att_err == 0 ? "successful" : "failed");
+}
+
 
 static void connected(struct bt_conn *conn, uint8_t conn_err)
 {
@@ -162,9 +172,7 @@ static void connected(struct bt_conn *conn, uint8_t conn_err)
 
 	default_conn = bt_conn_ref(conn);
 	printk("Connected: %s\n", addr);
-
 	is_connected = true;
-
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -238,7 +246,7 @@ static void test_peripheral_main(void)
 	k_sleep(K_MSEC(1000));
 
 	/* Wait for a while to disconnect */
-	k_sleep(K_MSEC(10000));
+	k_sleep(K_MSEC(100000));
 
 	/* Disconnect */
 	printk("Peripheral Disconnecting....\n");
@@ -366,6 +374,8 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	printk("Device connected\n");
 }
 
+volatile uint32_t m_time_char1_was_read;
+volatile uint32_t m_time_char2_was_read;
 uint8_t gatt_read_1_cb(struct bt_conn *conn, uint8_t err,
 		     struct bt_gatt_read_params *params,
 		     const void *data, uint16_t length)
@@ -380,12 +390,13 @@ uint8_t gatt_read_1_cb(struct bt_conn *conn, uint8_t err,
 		read_char_in_progress = false;
 		return BT_GATT_ITER_STOP;
 	} else {
-		printk("Data: ");
+		printk("Data1: ");
 		for (uint16_t i = 0; i < length; i++) {
 			printk("%d, ", *formatted_data);
 			formatted_data++;
 		}
 		printk("\n");
+		m_time_char1_was_read = k_cycle_get_32();
 	}
 
 
@@ -406,7 +417,8 @@ uint8_t gatt_read_2_cb(struct bt_conn *conn, uint8_t err,
 		read_char_in_progress = false;
 		return BT_GATT_ITER_STOP;
 	} else {
-		printk("Data: ");
+		m_time_char2_was_read = k_cycle_get_32();
+		printk("Data2: ");
 		for (uint16_t i = 0; i < length; i++) {
 			printk("%d, ", *formatted_data);
 			formatted_data++;
@@ -451,6 +463,14 @@ static void test_central_main(void)
 		k_sleep(K_MSEC(100));
 	}
 	printk("Central Connected.\n");
+	exchange_params.func = exchange_func;
+
+	err = bt_gatt_exchange_mtu(default_conn, &exchange_params);
+	if (err) {
+		printk("MTU exchange failed (err %d)\n", err);
+	} else {
+		printk("MTU exchange pending\n");
+	}
 
 	/* Wait a bit to ensure that all LLCP have time to finish */
 	k_sleep(K_MSEC(1000));
@@ -489,9 +509,6 @@ static void test_central_main(void)
 		FAIL("Gatt Read failed (err %d)\n", err);
 		return;
 	}
-
-	// Wait a bit, then read the  characteristic 2
-	k_sleep(K_MSEC(500));
 	struct bt_gatt_read_params read_params_2;
 	read_params_2.handle_count = 1;
 	read_params_2.single.handle = char_2_attr_handle;
@@ -503,6 +520,50 @@ static void test_central_main(void)
 	if (err) {
 		FAIL("Gatt Read failed (err %d)\n", err);
 		return;
+	}
+	k_sleep(K_MSEC(10000)); /*takes 6s ish do to the read on char1*/
+	int timediff_read2_read1 = m_time_char2_was_read - m_time_char1_was_read;
+	if (m_time_char1_was_read == 0 || m_time_char2_was_read == 0)
+	{
+		printk("Verdict: Something went wrong chars where not read m_time_char1_was_read=%i m_time_char2_was_read=%i", m_time_char1_was_read, m_time_char2_was_read);
+	} 
+	else if (timediff_read2_read1 > 0)
+	{
+		printk("Verdict: Pass. With EATT disabled char2 should finish seccond, diff %i\n", timediff_read2_read1);
+	} else
+	{
+		printk("Verdict: Fail. With EATT disabled char2 should finish seccond, diff %i\n", timediff_read2_read1);
+	}
+
+	printk("Connecting EATT channels\n");
+	int retval = bt_eatt_connect(default_conn, 2);
+	printk("bt_eatt_connect returned %i\n", retval);
+	k_sleep(K_MSEC(100)); /*wait a while for eatt enabeling finishing*/
+	m_time_char1_was_read = 0;
+	m_time_char2_was_read = 0;
+
+	err = bt_gatt_read(default_conn, &read_params);
+	if (err) {
+		FAIL("Gatt Read failed (err %d)\n", err);
+		return;
+	}
+	err = bt_gatt_read(default_conn, &read_params_2);
+	if (err) {
+		FAIL("Gatt Read failed (err %d)\n", err);
+		return;
+	}
+	k_sleep(K_MSEC(10000)); /*takes 6s ish do to the read on char1*/
+	timediff_read2_read1 = m_time_char2_was_read - m_time_char1_was_read;
+	if (m_time_char1_was_read == 0 || m_time_char2_was_read == 0)
+	{
+		printk("Verdict: Something went wrong chars where not read m_time_char1_was_read=%i m_time_char2_was_read=%i", m_time_char1_was_read, m_time_char2_was_read);
+	} 
+	else if (timediff_read2_read1 > 0)
+	{
+		printk("Verdict: Fail. With EATT enabled char1 should finish seccond, diff %i\n", timediff_read2_read1);
+	} else
+	{
+		printk("Verdict: Pass. With EATT enabled char1 should finish seccond, diff %i\n", timediff_read2_read1);
 	}
 
 	/* Wait for disconnect */

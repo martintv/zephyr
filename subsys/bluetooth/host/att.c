@@ -262,6 +262,7 @@ static void bt_att_sent(struct bt_l2cap_chan *ch)
 	struct bt_att_chan *chan = ATT_CHAN(ch);
 	struct bt_att *att = chan->att;
 	int err;
+	BT_DBG("matv: chan: %p", ch);
 
 	BT_DBG("chan %p", chan);
 
@@ -297,6 +298,7 @@ static void bt_att_sent(struct bt_l2cap_chan *ch)
 	if (!err) {
 		return;
 	}
+	BT_DBG("matv: global: %p", ch);
 
 	/* Process global queue */
 	(void)process_queue(chan, &att->tx_queue);
@@ -470,7 +472,7 @@ static void bt_att_chan_send_rsp(struct bt_att_chan *chan, struct net_buf *buf,
 				 bt_att_chan_sent_t cb)
 {
 	int err;
-
+	BT_DBG("matv: buf_len=%i send response chan: %p", buf->len, chan);
 	err = bt_att_chan_send(chan, buf, cb);
 	if (err) {
 		/* Responses need to be sent back using the same channel */
@@ -1039,6 +1041,10 @@ static ssize_t att_chan_read(struct bt_att_chan *chan,
 	if (chan->chan.tx.mtu <= net_buf_frags_len(buf)) {
 		return 0;
 	}
+	BT_DBG("net_buf_frags_len(buf)= %i chan->chan.tx.mtu=%i chan->chan.tx.mps %i", 
+		net_buf_frags_len(buf), 
+		chan->chan.tx.mtu, 
+		chan->chan.tx.mps);
 
 	frag = net_buf_frag_last(buf);
 
@@ -1260,6 +1266,7 @@ static uint8_t att_read_rsp(struct bt_att_chan *chan, uint8_t op, uint8_t rsp,
 {
 	struct bt_conn *conn = chan->chan.chan.conn;
 	struct read_data data;
+	BT_DBG("matv: att_read_rsp: %p", chan);
 
 	if (!bt_gatt_change_aware(conn, true)) {
 		return BT_ATT_ERR_DB_OUT_OF_SYNC;
@@ -1275,15 +1282,17 @@ static uint8_t att_read_rsp(struct bt_att_chan *chan, uint8_t op, uint8_t rsp,
 	if (!data.buf) {
 		return BT_ATT_ERR_UNLIKELY;
 	}
-
+	BT_DBG("matv: att_read_rsp: data.buf.len = %i", data.buf->len);
 	data.chan = chan;
 	data.offset = offset;
 
 	/* Pre-set error if no attr will be found in handle */
 	data.err = BT_ATT_ERR_INVALID_HANDLE;
 
+	BT_DBG("Before data.buf.len = %i", data.buf->len);
 	bt_gatt_foreach_attr(handle, handle, read_cb, &data);
-
+	BT_DBG("After data.buf.len = %i", data.buf->len);
+	
 	/* In case of error discard data and respond with an error */
 	if (data.err) {
 		net_buf_unref(data.buf);
@@ -2506,7 +2515,7 @@ struct net_buf *bt_att_create_pdu(struct bt_conn *conn, uint8_t op, size_t len)
 {
 	struct bt_att *att;
 	struct bt_att_chan *chan, *tmp;
-
+	BT_DBG("len: %i", len);
 	att = att_get(conn);
 	if (!att) {
 		return NULL;
@@ -2795,6 +2804,12 @@ static void bt_att_released(struct bt_l2cap_chan *ch)
 	k_mem_slab_free(&chan_slab, (void **)&chan);
 }
 
+NET_BUF_POOL_FIXED_DEFINE(data_rx_pool, 1, 2000, 8, NULL);
+static struct net_buf *att_alloc_buf(struct bt_l2cap_chan *chan)
+{
+	return net_buf_alloc(&data_rx_pool, K_FOREVER);
+}
+
 static struct bt_att_chan *att_chan_new(struct bt_att *att, atomic_val_t flags)
 {
 	int quota = 0;
@@ -2808,9 +2823,10 @@ static struct bt_att_chan *att_chan_new(struct bt_att *att, atomic_val_t flags)
 		.encrypt_change = bt_att_encrypt_change,
 	#endif /* CONFIG_BT_SMP */
 		.released = bt_att_released,
+		.alloc_buf	= att_alloc_buf,
 	};
 	struct bt_att_chan *chan;
-
+	BT_INFO("att_chan_new");
 	SYS_SLIST_FOR_EACH_CONTAINER(&att->chans, chan, node) {
 		if (chan->att == att) {
 			quota++;
@@ -2821,12 +2837,11 @@ static struct bt_att_chan *att_chan_new(struct bt_att *att, atomic_val_t flags)
 			return NULL;
 		}
 	}
-
-	if (k_mem_slab_alloc(&chan_slab, (void **)&chan, K_NO_WAIT)) {
-		BT_ERR("No available ATT channel for conn %p", att->conn);
+	int retval = k_mem_slab_alloc(&chan_slab, (void **)&chan, K_NO_WAIT);
+	if (retval) {
+		BT_ERR("No available ATT channel for conn %p retval: %i channels: %i bt_max_conn: %i", att->conn, retval, CONFIG_BT_EATT_MAX, CONFIG_BT_MAX_CONN);
 		return NULL;
 	}
-
 	(void)memset(chan, 0, sizeof(*chan));
 	chan->chan.chan.ops = &ops;
 	k_fifo_init(&chan->tx_queue);
@@ -2841,10 +2856,10 @@ static int bt_att_accept(struct bt_conn *conn, struct bt_l2cap_chan **ch)
 	struct bt_att *att;
 	struct bt_att_chan *chan;
 
-	BT_DBG("conn %p handle %u", conn, conn->handle);
-
-	if (k_mem_slab_alloc(&att_slab, (void **)&att, K_NO_WAIT)) {
-		BT_ERR("No available ATT context for conn %p", conn);
+	BT_DBG("bt_att_accept: conn %p handle %u", conn, conn->handle);
+	int retval = k_mem_slab_alloc(&att_slab, (void **)&att, K_NO_WAIT);
+	if (retval) {
+		BT_ERR("No available ATT context for conn %p retval: %i", conn, retval);
 		return -ENOMEM;
 	}
 

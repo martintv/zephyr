@@ -806,35 +806,25 @@ static void l2cap_chan_rx_init(struct bt_l2cap_le_chan *chan)
 	/* MPS shall not be bigger than MTU + BT_L2CAP_SDU_HDR_SIZE as the
 	 * remaining bytes cannot be used.
 	 */
-	chan->rx.mps = MIN(chan->rx.mtu + BT_L2CAP_SDU_HDR_SIZE,
-			   BT_L2CAP_RX_MTU);
+	chan->rx.mps = 64;
 
-	/* Truncate MTU if channel have disabled segmentation but still have
+    /* Truncate MTU if channel have disabled segmentation but still have
 	 * set an MTU which requires it.
 	 */
 	if (!chan->chan.ops->alloc_buf &&
-	    (chan->rx.mps < chan->rx.mtu + BT_L2CAP_SDU_HDR_SIZE)) {
-		BT_WARN("Segmentation disabled but MTU > MPS, truncating MTU");
-		chan->rx.mtu = chan->rx.mps - BT_L2CAP_SDU_HDR_SIZE;
+		(chan->rx.mps < chan->rx.mtu + BT_L2CAP_SDU_HDR_SIZE)) {
+			BT_WARN("Segmentation disabled but MTU > MPS, truncating MTU");
+			chan->rx.mtu = chan->rx.mps - BT_L2CAP_SDU_HDR_SIZE;
 	}
 
-	/* Use existing credits if defined */
-	if (!chan->rx.init_credits) {
-		if (chan->chan.ops->alloc_buf) {
-			/* Auto tune credits to receive a full packet */
-			chan->rx.init_credits =
-				ceiling_fraction(chan->rx.mtu,
-						 BT_L2CAP_RX_MTU);
-		} else {
-			chan->rx.init_credits = L2CAP_LE_MAX_CREDITS;
-		}
-	}
+	/* Auto tune credits to receive a full packet */
+	chan->rx.init_credits = chan->rx.mtu / chan->rx.mps;
 
 	atomic_set(&chan->rx.credits,  0);
 
 	if (BT_DBG_ENABLED &&
-	    chan->rx.init_credits * chan->rx.mps <
-	    chan->rx.mtu + BT_L2CAP_SDU_HDR_SIZE) {
+		chan->rx.init_credits * chan->rx.mps <
+		chan->rx.mtu + BT_L2CAP_SDU_HDR_SIZE) {
 		BT_WARN("Not enough credits for a full packet");
 	}
 }
@@ -860,6 +850,7 @@ static void l2cap_chan_tx_process(struct k_work *work)
 {
 	struct bt_l2cap_le_chan *ch;
 	struct net_buf *buf;
+	BT_DBG("matv");
 
 	ch = CONTAINER_OF(work, struct bt_l2cap_le_chan, tx_work);
 
@@ -1764,6 +1755,7 @@ segment:
 
 static void l2cap_chan_tx_resume(struct bt_l2cap_le_chan *ch)
 {
+	BT_DBG("matv: ch", ch);
 	if (!atomic_get(&ch->tx.credits) ||
 	    (k_fifo_is_empty(&ch->tx_queue) && !ch->tx_buf)) {
 		return;
@@ -1855,8 +1847,7 @@ static int l2cap_chan_le_send(struct bt_l2cap_le_chan *ch,
 		return -EAGAIN;
 	}
 
-	BT_DBG("ch %p cid 0x%04x len %u credits %lu", ch, ch->tx.cid,
-	       seg->len, atomic_get(&ch->tx.credits));
+
 
 	len = seg->len - sdu_hdr_len;
 
@@ -1864,10 +1855,14 @@ static int l2cap_chan_le_send(struct bt_l2cap_le_chan *ch,
 	 * callback has been set.
 	 */
 	if ((buf == seg || !buf->len) && ch->chan.ops->sent) {
+		BT_DBG("matv1: ch %p cid 0x%04x len %u credits %lu", ch, ch->tx.cid,
+	       seg->len, atomic_get(&ch->tx.credits));
 		err = bt_l2cap_send_cb(ch->chan.conn, ch->tx.cid, seg,
 				       l2cap_chan_sdu_sent,
 				       UINT_TO_POINTER(ch->tx.cid));
 	} else {
+		BT_DBG("matv2: ch %p cid 0x%04x len %u credits %lu", ch, ch->tx.cid,
+	       seg->len, atomic_get(&ch->tx.credits));		
 		err = bt_l2cap_send_cb(ch->chan.conn, ch->tx.cid, seg,
 				       l2cap_chan_seg_sent,
 				       UINT_TO_POINTER(ch->tx.cid));
@@ -1876,18 +1871,19 @@ static int l2cap_chan_le_send(struct bt_l2cap_le_chan *ch,
 	if (err) {
 		BT_WARN("Unable to send seg %d", err);
 		atomic_inc(&ch->tx.credits);
-
+		
+		if (err == -ENOBUFS) {
+			/* Restore state since segment could not be sent */
+			BT_WARN("Restore");
+			net_buf_simple_restore(&buf->b, &state);
+			return -EAGAIN;
+		}
 		/* If the segment is not the original buffer release it since it
 		 * won't be needed anymore.
 		 */
 		if (seg != buf) {
+			BT_WARN("Not from original");
 			net_buf_unref(seg);
-		}
-
-		if (err == -ENOBUFS) {
-			/* Restore state since segment could not be sent */
-			net_buf_simple_restore(&buf->b, &state);
-			return -EAGAIN;
 		}
 
 		return err;
