@@ -42,12 +42,19 @@ static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
 };
 
-#define DATA_MTU 128
+#define DATA_MTU 2000
+#define DATA_MPS 65
 #define DATA_BUF_SIZE BT_L2CAP_SDU_BUF_SIZE(DATA_MTU)
 #define L2CAP_CHANNELS 5
 #define SERVERS 1
 
-NET_BUF_POOL_FIXED_DEFINE(data_pool, L2CAP_CHANNELS, DATA_BUF_SIZE, 8, NULL);
+NET_BUF_POOL_FIXED_DEFINE(rx_data_pool, L2CAP_CHANNELS, 
+						  BT_L2CAP_BUF_SIZE(DATA_BUF_SIZE), 8, 
+						NULL);
+
+NET_BUF_POOL_FIXED_DEFINE(tx_data_pool, L2CAP_CHANNELS,
+		    			  BT_L2CAP_BUF_SIZE(DATA_MTU), 0,
+		    			  NULL);
 
 static struct channel {
 	uint8_t chan_id; /* Internal number that identifies L2CAP channel. */
@@ -84,7 +91,8 @@ static struct bt_l2cap_server servers[SERVERS];
 
 static struct net_buf *chan_alloc_buf_cb(struct bt_l2cap_chan *chan)
 {
-	return net_buf_alloc(&data_pool, K_FOREVER);
+	printk("Allocated on chan %p", chan);
+	return net_buf_alloc(&rx_data_pool, K_FOREVER);
 }
 
 static int chan_recv_cb(struct bt_l2cap_chan *l2cap_chan, struct net_buf *buf)
@@ -105,6 +113,7 @@ static void chan_sent_cb(struct bt_l2cap_chan *l2cap_chan)
 	printk("chan_sent_cb: chan_id: %d\n", chan->chan_id);
 }
 
+static volatile int num_connect_chans = 0;
 static void chan_connected_cb(struct bt_l2cap_chan *l2cap_chan)
 {
 	struct channel *chan = CONTAINER_OF(l2cap_chan, struct channel, le);
@@ -117,7 +126,7 @@ static void chan_connected_cb(struct bt_l2cap_chan *l2cap_chan)
 			sys_cpu_to_le16(chan->le.rx.mtu),
 			sys_cpu_to_le16(chan->le.rx.mps));
 
-	/* TODO something when channel is connected */
+	num_connect_chans++;
 }
 
 static void chan_disconnected_cb(struct bt_l2cap_chan *l2cap_chan)
@@ -166,31 +175,6 @@ static const struct bt_l2cap_chan_ops l2cap_ops = {
 	.reconfigured	= chan_reconfigured_cb,
 };
 
-static void connect_num_channels_eatt(uint8_t num_l2cap_channels)
-{
-	struct channel *chan = NULL;
-	struct bt_l2cap_chan *allocated_channels[L2CAP_CHANNELS] = {NULL};
-	uint8_t i = 0;
-	int err = 0;
-
-	for (i = 0U; i < num_l2cap_channels; i++) {
-		chan = get_free_channel();
-		if (!chan) {
-			printk("connect_num_channels: failed, chan not free \n");
-			/* TODO should fail */
-			return;
-		}
-		chan->le.chan.ops = &l2cap_ops;
-		chan->le.tx.mtu = DATA_MTU;
-		allocated_channels[i] = &chan->le.chan;
-	}
-
-	err = bt_l2cap_ecred_chan_connect(default_conn, allocated_channels,
-						0x27);
-	if (err) {
-		printk("connect_num_channels: can't connect ecred %d \n", err);
-	}
-}
 static void connect_num_channels(uint8_t num_l2cap_channels)
 {
 	struct channel *chan = NULL;
@@ -206,7 +190,8 @@ static void connect_num_channels(uint8_t num_l2cap_channels)
 			return;
 		}
 		chan->le.chan.ops = &l2cap_ops;
-		chan->le.tx.mtu = DATA_MTU;
+		chan->le.rx.mtu = DATA_MTU;
+		chan->le.rx.mps = DATA_MPS;
 		allocated_channels[i] = &chan->le.chan;
 	}
 
@@ -337,12 +322,37 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.disconnected = disconnected,
 };
 
+static void send(int chan_idx, int bytes)
+{
+	static uint8_t data_to_send[3000];
+	for (int i = 0; i<3000; i++)
+	{
+		data_to_send[i]=i%0xff;
+	}
+	struct bt_l2cap_chan *chan = &channels[chan_idx].le.chan;
+
+	struct net_buf *buf = net_buf_alloc(&tx_data_pool, K_NO_WAIT);
+	if (buf == NULL) {
+		printk("Error: didnt get buffer\n");
+	}
+
+	net_buf_reserve(buf, BT_L2CAP_CHAN_SEND_RESERVE);
+	net_buf_add_mem(buf, data_to_send, bytes);
+
+	int ret = bt_l2cap_chan_send(chan, buf);
+	printk("bt_l2cap_chan_send returned: %i\n", ret);
+
+	if (ret < 0) {
+		printk("Error: send failed error: %i\n", ret);
+		net_buf_unref(buf);
+	}
+}
 
 static void test_peripheral_main(void)
 {
 	int err;
 
-	printk("\n*EATT Peripheral started*\n");
+	printk("\n*ECFC Peripheral started*\n");
 
 	err = bt_enable(NULL);
 	if (err) {
@@ -371,25 +381,23 @@ static void test_peripheral_main(void)
 	register_l2cap_server();
 
 	// Connecting max_channels - 1
-	connect_num_channels(4);
+	connect_num_channels(5);
+
+	//while (num_connect_chans < 5)
+	//{
+	//}
+	k_sleep(K_MSEC(500));
+	
+	printk("Sendign on chan0\n");
+	send(0, DATA_MTU-2); /*Send a full SDU on channel 0*/
+	printk("Sendign on chan1\n");
+	send(1, DATA_MPS-2); /*Send only one PDU on channel 0. This should finish first*/
 
 	/* Just wait until as the final channel will be connected in the test tick. */
 	bst_ticker_set_next_tick_absolute(2000000); /* 2 seconds */
 	k_sleep(K_MSEC(5000));
 
 
-#if 0
-	for (uint8_t i = 0; i < 50; i++) {
-		connect_num_channels(5);
-
-		/* Wait a bit, to let the connection be done. */
-		k_sleep(K_MSEC(101));
-		disconnect_all_channels();
-
-		/* Wait a bit, to let the channel disconnect finish */
-		k_sleep(K_MSEC(101));
-	}
-#endif
 
 	/* Disconnect */
 	printk("Peripheral Disconnecting....\n");
@@ -407,7 +415,7 @@ static void test_peripheral_main(void)
 	}
 	printk("Peripheral Disconnected.\n");
 
-	PASS("EATT Peripheral tests Passed\n");
+	PASS("ECFC Peripheral tests Passed\n");
 	bs_trace_silent_exit(0);
 
 	return;
@@ -447,7 +455,7 @@ static void test_central_main(void)
 
 	int err;
 
-	printk("\n*EATT Central started*\n");
+	printk("\n*ECFC Central started*\n");
 
 	err = bt_enable(NULL);
 	if (err) {
@@ -479,25 +487,13 @@ static void test_central_main(void)
 	bst_ticker_set_next_tick_absolute(2000000); /* 2 seconds */
 	k_sleep(K_MSEC(5000));
 
-#if 0
-	for (uint8_t i = 0; i < 50; i++) {
-		connect_num_channels(1);
-
-		/* Wait a bit, to let the connection be done. */
-		k_sleep(K_MSEC(100));
-		disconnect_all_channels();
-
-		/* Wait a bit, to let the channel disconnect finish */
-		k_sleep(K_MSEC(200));
-	}
-#endif
 	/* Wait for disconnect */
 	while (is_connected) {
 		k_sleep(K_MSEC(100));
 	}
 	printk("Central Disconnected.\n");
 
-	PASS("EATT Central tests Passed\n");
+	PASS("ECFC Central tests Passed\n");
 
 	return;
 }
@@ -508,20 +504,20 @@ static void test_init(void)
 }
 static void test_tick(bs_time_t HW_device_time)
 {
-	connect_num_channels(2);
+
 }
 
 static const struct bst_test_instance test_def[] = {
 	{
 		.test_id = "peripheral",
-		.test_descr = "Peripheral EATT",
+		.test_descr = "Peripheral ECFC",
 		.test_post_init_f = test_init,
 		.test_tick_f = test_tick,
 		.test_main_f = test_peripheral_main
 	},
 	{
 		.test_id = "central",
-		.test_descr = "Central EATT",
+		.test_descr = "Central ECFC",
 		.test_post_init_f = test_init,
 		.test_tick_f = test_tick,
 		.test_main_f = test_central_main
@@ -529,7 +525,7 @@ static const struct bst_test_instance test_def[] = {
 	BSTEST_END_MARKER
 };
 
-struct bst_test_list *test_main_eatt_install(struct bst_test_list *tests)
+struct bst_test_list *test_main_ecfc_install(struct bst_test_list *tests)
 {
 	return bst_add_tests(tests, test_def);
 }
