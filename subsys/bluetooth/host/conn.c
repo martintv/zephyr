@@ -358,7 +358,7 @@ static struct bt_conn_tx *conn_tx_alloc(void)
 		BT_WARN("Unable to get an immediate free conn_tx");
 	}
 
-	return k_fifo_get(&free_tx, K_FOREVER);
+	return k_fifo_get(&free_tx, K_NO_WAIT);
 }
 
 int bt_conn_send_cb(struct bt_conn *conn, struct net_buf *buf,

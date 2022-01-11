@@ -1804,6 +1804,16 @@ static void l2cap_chan_seg_sent(struct bt_conn *conn, void *user_data)
 		/* Received segment sent callback for disconnected channel */
 		return;
 	}
+	struct bt_l2cap_chan *iterator;
+
+	SYS_SLIST_FOR_EACH_CONTAINER(&conn->channels, iterator, node) {
+		uint16_t it_cid = BT_L2CAP_LE_CHAN(iterator)->tx.cid;
+		if (BT_L2CAP_LE_CHAN(iterator)->tx.cid != cid)
+		{
+			BT_DBG("Trying to resume on other channels that might be waiting");
+			l2cap_chan_tx_resume(BT_L2CAP_LE_CHAN(iterator));
+		}
+	}
 
 	l2cap_chan_tx_resume(BT_L2CAP_LE_CHAN(chan));
 }
@@ -2849,8 +2859,8 @@ int bt_l2cap_chan_send(struct bt_l2cap_chan *chan, struct net_buf *buf)
 
 	err = l2cap_chan_le_send_sdu(ch, &buf, 0);
 	if (err < 0) {
-		if (err == -EAGAIN && data_sent(buf)->len) {
-			/* Queue buffer if at least one segment could be sent */
+		if (err == -EAGAIN) {
+			BT_DBG("Matv: Queue buffer so it is sent later");
 			net_buf_put(&ch->tx_queue, buf);
 			return data_sent(buf)->len;
 		}
