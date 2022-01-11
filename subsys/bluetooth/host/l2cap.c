@@ -853,7 +853,6 @@ static struct net_buf *l2cap_chan_le_get_tx_buf(struct bt_l2cap_le_chan *ch)
 	return net_buf_get(&ch->tx_queue, K_NO_WAIT);
 }
 
-int m_sent_segs = 0;
 static int l2cap_chan_le_send_sdu(struct bt_l2cap_le_chan *ch,
 				  struct net_buf **buf, uint16_t sent);
 
@@ -1841,11 +1840,6 @@ static int l2cap_chan_le_send(struct bt_l2cap_le_chan *ch,
 	struct net_buf *seg;
 	struct net_buf_simple_state state;
 	int len, err;
-	m_sent_segs++;
-	if (m_sent_segs == 3)
-	{
-		return -EAGAIN;
-	}
 
 	if (!test_and_dec(&ch->tx.credits)) {
 		BT_WARN("No credits to transmit packet");
@@ -1928,7 +1922,7 @@ static int l2cap_chan_le_send_sdu(struct bt_l2cap_le_chan *ch,
 	if (!frag->len && frag->frags) {
 		frag = frag->frags;
 	}
-	m_sent_segs = 0;
+
 	if (!sent) {
 		/* Add SDU length for the first segment */
 		ret = l2cap_chan_le_send(ch, frag, BT_L2CAP_SDU_HDR_SIZE);
