@@ -52,7 +52,11 @@ NET_BUF_POOL_FIXED_DEFINE(rx_data_pool, L2CAP_CHANNELS,
 						  BT_L2CAP_BUF_SIZE(DATA_BUF_SIZE), 8, 
 						NULL);
 
-NET_BUF_POOL_FIXED_DEFINE(tx_data_pool, L2CAP_CHANNELS,
+NET_BUF_POOL_FIXED_DEFINE(tx_data_pool0, 1,
+		    			  BT_L2CAP_BUF_SIZE(DATA_MTU), 0,
+		    			  NULL);
+
+NET_BUF_POOL_FIXED_DEFINE(tx_data_pool1, 1,
 		    			  BT_L2CAP_BUF_SIZE(DATA_MTU), 0,
 		    			  NULL);
 
@@ -73,7 +77,6 @@ static struct channel *get_free_channel()
 		}
 
 		chan = &channels[i];
-
 		(void)memset(chan, 0, sizeof(*chan));
 		chan->chan_id = i;
 
@@ -330,13 +333,27 @@ static void send(int chan_idx, int bytes)
 		data_to_send[i]=i%0xff;
 	}
 	struct bt_l2cap_chan *chan = &channels[chan_idx].le.chan;
-
-	struct net_buf *buf = net_buf_alloc(&tx_data_pool, K_NO_WAIT);
+	struct net_buf *buf;
+	switch (chan_idx)
+	{
+		case 0:
+		  buf = net_buf_alloc(&tx_data_pool0, K_NO_WAIT);
+			break;
+		case 1:
+	 	  buf = net_buf_alloc(&tx_data_pool1, K_NO_WAIT);
+		break;
+		default:
+		printk("not enough pool");
+		break;
+	}
 	if (buf == NULL) {
 		printk("Error: didnt get buffer\n");
 	}
-
-	net_buf_reserve(buf, BT_L2CAP_CHAN_SEND_RESERVE);
+	printk("matv send() got buffer pool_id = %i ", buf->pool_id);
+	/* matv: get segfault inside stack on send(1) if we dont allocate enough space here
+	 * I want to udnerstand why.
+     */
+	net_buf_reserve(buf, BT_L2CAP_CHAN_SEND_RESERVE + BT_L2CAP_SDU_HDR_SIZE);
 	net_buf_add_mem(buf, data_to_send, bytes);
 
 	int ret = bt_l2cap_chan_send(chan, buf);
